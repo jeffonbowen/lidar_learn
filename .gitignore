@@ -8,6 +8,8 @@
 
 # User-specific files
 .Ruserdata
+.las
+.laz
 
 # Example code in package build process
 *-Ex.R
