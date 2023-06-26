@@ -3,20 +3,58 @@
 library(lidR)
 library(rlas)
 library(lidRviewer)
+
 library(sf)
-library(rgdal)
-library(terra)
-library(rayshader)
-library(tidyverse)
 library(mapview)
+library(terra)
 library(raster)
+library(gridExtra)    # Helpers for grid graphics
+library(rayshader)
+
+library(tidyverse)
+library(ggpmisc)
 library(RCSF)
 library(ggpubr)
 }
 
+library(future)
+
+# Reference ---------------------------------------------------------------
+
+# 1 = unclassified
+# 2 = ground
+# 4 = medium vegetation
+
+# Functions ---------------------------------------------------------------
+
+plot_crossection <- function(las,
+                             p1 = c(min(las@data$X), mean(las@data$Y)),
+                             p2 = c(max(las@data$X), mean(las@data$Y)),
+                             width = 4, colour_by = NULL) {
+  colour_by <- rlang::enquo(colour_by)
+  data_clip <- clip_transect(las, p1, p2, width)
+  p <- ggplot(data_clip@data, aes(X,Z)) + 
+    geom_point(size = 0.5) + 
+#    scale_color_continuous(type = "viridis") +
+    coord_equal() + 
+    theme_minimal() +
+    xlab("UTM E") + 
+    ylab("Elevation (m)")
+  
+  if (!is.null(colour_by))
+    p <- p + aes(color = !!colour_by) + labs(color = "")
+  
+  return(p)
+}
+
+
+
 # Load footprint
 
 fp <- readOGR(dsn = "squamish/shp/footprint.shp") %>% st_as_sfc()
+fp <- st_read(dsn = "squamish/footprint2.kml") %>% 
+  st_transform(crs = 26910)
+
 plot(fp)
 mapview(fp)
 
@@ -61,20 +99,25 @@ plot(pc, color = "Intensity", bg = "white", size = 4)
 plot(pc, colour = "Intensity", bg = "white", size = 4, backend = "lidRviewer")
 
 # Load all tiles as a catalog
+# All returns
+ctg_pc <- readLAScatalog("squamish/point_cloud/raw", 
+                         filter = "-drop_z_below 0 -drop_class 7")
+# First returns only
 ctg_pc <- readLAScatalog("squamish/point_cloud/raw", 
                          filter = "-keep_first -drop_z_below 0 -drop_class 7")
+plot(ctg_pc, mapview = TRUE)
 
 # Clip pc now so that we are not transforming the entire catalog. 
 aoi_albers <- st_transform(aoi, crs = 3005)
 pc <- clip_roi(ctg_pc, aoi_albers)
 
-# Now transform in to UTM Zone 10N
-pc <- st_transform(pc, crs = 26910)
-
 # Not a lot of duplicates, but helps
 pc <- filter_duplicates(pc)
 
-plot(pc, bg = "white")
+# Now transform in to UTM Zone 10N
+pc <- st_transform(pc, crs = 26910)
+
+plot(pc, bg = "white", mapview = TRUE)
 
 # Save
 writeLAS(pc, "squamish/point_cloud/processed/pc_aoi.laz")
@@ -85,7 +128,7 @@ plot(pc, color = "Classification", bg = "white", legend = TRUE)
 
 # Can get rid of transmission line by removing unclassified.
 # "vg" is veg / ground.
-# However, much of teh unclassified is vegetation and it means losing
+# However, much of the unclassified is vegetation and it means losing
 # a lof points that are veg. For this project area, best to leave with 
 # unclassified in. 
 pc_v_g <- filter_poi(pc, Classification != 1L)
@@ -94,10 +137,10 @@ plot(pc_v_g, bg = "white")
 # Look at a cross-section
 transect_length <- 400
 p1 <- c(489407, 5515288)
-plot_crossection(pc, p1 , c(p1[1]+transect_length, p1[2]), colour_by = factor(Classification))
+plot_crossection(pc, p1 , c(p1[1]+transect_length, p1[2]), colour_by = Z)
 
 p2 <- c(489591, 5515263)
-plot_crossection(pc, p2 , c(p2[1]+transect_length, p2[2]), colour_by = factor(Classification))
+plot_crossection(pc, p2 , c(p2[1]+transect_length, p2[2]), colour_by = Intensity)
 
 ## DEM / DTM
 # I compared the dem provided in the lidar catalogue with making one from
@@ -120,17 +163,79 @@ dtm_hillshade <- shade(slope = dtm_prod$slope, aspect = dtm_prod$aspect)
 plot(dtm_hillshade, col =gray(0:30/30), legend = FALSE)
 plot(fp, add = TRUE)
 
-## Canopy
-# Using dtm
-veg_n <- pc_v_g - dtm
-plot(veg_n, size = 3, bg = "white")
+
+# Rayshader
+
+dtm <- raster(dem)
+dtm_m <- raster_to_matrix(dtm)
+
+dtm_m %>%
+  height_shade() %>%
+  # add_shadow(ray_shade(dtm_m)) %>%
+  # add_shadow(lamb_shade(dtm_m, zscale = 0.5),0) %>%
+  # add_shadow(texture_shade(dtm_m,detail=8/10,contrast=9,brightness = 11)) %>%
+  # add_shadow(ambient_shade(dtm_m), 0) %>%
+  add_overlay(fpr, 0.5) %>%
+  plot_map(heightmap = dtm_m, solid = TRUE, shadow = TRUE, zscale = 0.5)
+
+
+
+dtm_m %>%
+  height_shade() %>%
+  add_shadow(ray_shade(dtm_m)) %>%
+  add_shadow(lamb_shade(dtm_m, zscale = 0.5),0) %>%
+  add_shadow(texture_shade(dtm_m,detail=8/10,contrast=9,brightness = 11)) %>%
+  add_shadow(ambient_shade(dtm_m), 0) %>%
+  # add_overlay(generate_polygon_overlay(fp, extent = st_bbox(fp),
+  #                                      heightmap = dtm_m), 0.5) %>% 
+  plot_3d(heightmap = dtm_m, solid = TRUE, shadow = TRUE, zscale = 1)
+
+rgl.snapshot('squamish/out/3dplot1.png', fmt = 'png')
+
+
+
+# Vegetation Analysis -----------------------------------------------------
+
+# For cross-sections
+transect_length <- 400
+p1 <- c(489407, 5515288)
+
+# Normalize using dtm
+# veg_n <- pc - dtm
+# plot(veg_n, size = 3, bg = "white")
 
 # using point cloud and interpolation. This is better. 
-veg_n <- normalize_height(pc, knnidw())
-y <- plot(veg_n, size = 3, bg = "white")
-add_dtm3d(y, dtm)
+pc_n <- normalize_height(pc, knnidw())
+plot(pc_n, size = 3, bg = "white")
+plot_crossection(pc_n, p1 , c(p1[1]+transect_length, p1[2]), colour_by = factor(Classification))
 
-# CHM
+# Can now remove ground points.
+# The unclassified should stay because they are probably vegetation. 
+veg_n <- filter_poi(pc_n, Classification != 2L)
+plot_crossection(veg_n, p1 , c(p1[1]+transect_length, p1[2]), colour_by = factor(Classification))
+
+# Remove unclassified for comparison. 
+veg_n2 <- filter_poi(veg_n, Classification != 1L)
+plot_crossection(veg_n2, p1 , c(p1[1]+transect_length, p1[2]), colour_by = factor(Classification))
+
+# First return only for comparison. 
+# Note that all veg classified points are first return.
+veg_n3 <- filter_first(veg_n)
+plot_crossection(veg_n3, p1 , c(p1[1]+transect_length, p1[2]), colour_by = Z)
+
+# Understorey
+veg_u <- filter_poi(veg_n, Z < 10)
+plot_crossection(veg_u, p1 , c(p1[1]+transect_length, p1[2]), 
+                 colour_by = factor(Classification))
+
+veg_n <- filter_poi(veg_n, Z)
+u <- rasterize_canopy(veg_u, res = 0.5, 
+                        algorithm = p2r(subcircle = 0.15, na.fill = tin()))
+plot(u, legend = TRUE)
+plot(fp, add = TRUE)
+
+
+## CHM
 col = height.colors(25)
 chm <- rasterize_canopy(veg_n, res = 0.5, 
                         algorithm = p2r(subcircle = 0.15, na.fill = tin()))
@@ -191,29 +296,46 @@ x <- plot(pc, bg = "white", size = 4)
 add_treetops3d(x, ttops)
 
 
-## Functions
-plot_crossection <- function(las,
-                             p1 = c(min(las@data$X), mean(las@data$Y)),
-                             p2 = c(max(las@data$X), mean(las@data$Y)),
-                             width = 4, colour_by = NULL) {
-  colour_by <- rlang::enquo(colour_by)
-  data_clip <- clip_transect(las, p1, p2, width)
-  p <- ggplot(data_clip@data, aes(X,Z)) + 
-    geom_point(size = 0.5) + 
-    coord_equal() + 
-    theme_minimal() +
-    xlab("UTM E") + 
-    ylab("Elevation (m)")
-  
-  if (!is.null(colour_by))
-    p <- p + aes(color = !!colour_by) + labs(color = "")
-  
-  return(p)
-}
+dsm <- rasterize_canopy(pc)
+dsm <- raster(dsm)
+dsm_m <- raster_to_matrix(dsm)
+
+dsm_m %>%
+  height_shade() %>%
+  add_shadow(ray_shade(dsm_m)) %>%
+  add_shadow(lamb_shade(dsm_m, zscale = 0.5),0) %>%
+  add_shadow(texture_shade(dsm_m,detail=8/10,contrast=9,brightness = 11)) %>%
+  add_shadow(ambient_shade(dsm_m), 0) %>%
+  plot_map(heightmap = dsm_m, filename = "squamish/out/dsm_rayshade.png",
+           solid = TRUE, shadow = TRUE, zscale = 1)
+
+## Segment Snags
+
+BBPRthrsh_mat <- matrix(
+  c(0.80, 0.80, 0.70, 0.85, 
+    0.85, 0.60, 0.80, 0.80, 
+    0.60, 0.90, 0.90, 0.55),
+  nrow = 3L, ncol = 4L)
+
+algorithm <- wing2015(neigh_radii = c(1.5, 1, 2), low_int_thrsh = 50, uppr_int_thrsh = 170, pt_den_req = 3, BBPRthrsh_mat = BBPRthrsh_mat)
+
+snags <- segment_snags(pc, algorithm)
+
+colorPal <- c("white", "red", "orange", "yellow", "light green")
+plot(snags, color = "snagCls", colorPalette = colorPal) 
+
+snags_out <- filter_poi(snags, snagCls > 0)
+colorPal <- c("red", "orange", "yellow", "light green")
+plot(snags_out, color = "snagCls", colorPalette = colorPal) 
+table(snags_out$snagCls)
 
 
 
+# Metrics -----------------------------------------------------------------
 
+cl <- cloud_metrics(pc, .stdmetrics)
+cl <- as.data.frame(cl) %>% t()
+cl
 
 
 

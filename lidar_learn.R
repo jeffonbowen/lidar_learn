@@ -7,6 +7,8 @@ library(terra)
 library(tidyverse)
 library(mapview)
 library(raster)
+library(RCSF)
+library(ggpubr)
 
 # Using the Squamish Landfill area as test. 
 # 092g075_3_4_3 is the north tile
@@ -75,6 +77,7 @@ table(test$Classification)
 plot(pc_aoi, bg = "white")
 
 writeLAS(pc_aoi, "dat/point_cloud/pc_aoi.laz")
+pc_aoi <- readLAS("dat/point_cloud/pc_aoi.laz")
 
 first <- filter_first(pc_aoi)
 plot(first, size = 3, bg = "white", color = "Classification")
@@ -84,8 +87,6 @@ plot(first, size = 3, bg = "white", color = "Classification")
 p1 <- c(1205240, 534375)
 p2 <- c(1206006, 534000)
 plot_crossection(pc_aoi, p1 , p2, colour_by = factor(Classification))
-
-
 
 
 ## Create DTM
@@ -127,8 +128,11 @@ plot(chm2, col = height.colors(50))
 plot(sf::st_geometry(ttops), add = TRUE, pch = 3)
 st_write(ttops, "dat/ttops.gpkg", append = FALSE)
 
-## Functions
+x <- plot(pc_aoi, bg = "white", size = 4)
+add_treetops3d(x, ttops)
 
+
+## Functions
 plot_crossection <- function(las,
                              p1 = c(min(las@data$X), mean(las@data$Y)),
                              p2 = c(max(las@data$X), mean(las@data$Y)),
