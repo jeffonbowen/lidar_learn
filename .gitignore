@@ -1,3 +1,14 @@
+# Data
+*.las
+*.laz
+refuge/dat/shp/*.*
+
+# Outputs
+*.jpg
+*.jpeg
+*.png
+*.tif
+
 # History files
 .Rhistory
 .Rapp.history
